@@ -1,0 +1,4 @@
+how are
+youcurrent working directory: /home/caspl202/Downloads/Lab-C
+enter input
+Exiting 
