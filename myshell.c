@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <fcntl.h>
+#include <errno.h>
 
 int debug = 0;
 
@@ -21,34 +22,64 @@ void pipecmd(cmdLine *lineFromInput) {
     }
     //child1 process
     if(child1PID==0) {
-        // close(STDOUT_FILENO);
-        dup2(pd[1],STDOUT_FILENO);
+        close(STDOUT_FILENO);
+        dup(pd[1]);
         close(pd[1]);
-        execvp(lineFromInput->arguments[0],lineFromInput->arguments);
+        close(pd[0]);
+        if (lineFromInput->inputRedirect) {
+            int inputFile = open(lineFromInput->inputRedirect, O_RDONLY);
+            if (inputFile == -1) {
+                perror("Error in open for input");
+                freeCmdLines(lineFromInput);
+                exit(1);
+            }
+            dup2(inputFile,STDIN_FILENO);
+            close(inputFile);
+        }
+        if(execvp(lineFromInput->arguments[0],lineFromInput->arguments)==-1){
+            perror("Error in execv");
+            freeCmdLines(lineFromInput);
+            exit(1);
+        }
     }
     //parent process
     else {
         fprintf(stderr, "(parent_process>created child1 process with id: %d)\n", child1PID);
         close(pd[1]);
+        pid_t child2PID = fork();
+        if(child2PID==-1) {
+            perror("error in fork2. Exiting\n");
+            exit(1);
+        }
+        //child2 process
+        if(child2PID==0) {
+            close(STDIN_FILENO);
+            dup(pd[0]);
+            close(pd[0]);
+            close(pd[1]);
+             if(lineFromInput->next->outputRedirect) {
+                int outputFile = open(lineFromInput->next->outputRedirect, O_WRONLY|O_CREAT);
+                if (outputFile == -1) {
+                    perror("Error in open for output");
+                    freeCmdLines(lineFromInput);
+                    exit(1);
+            }
+            dup2(outputFile,STDOUT_FILENO);
+            close(outputFile);
+            }
+            if(execvp(lineFromInput->next->arguments[0],lineFromInput->next->arguments)==-1){
+                 perror("Error in execv");
+                freeCmdLines(lineFromInput);
+                exit(1);
+            }
+        }
+        else {
+            fprintf(stderr, "(parent_process>created child2 process with id: %d)\n", child2PID);
+            close(pd[0]);
+            waitpid(child1PID, NULL, 0);
+            waitpid(child2PID, NULL, 0);
+        }
     }
-    pid_t child2PID = fork();
-    if(child2PID==-1) {
-        perror("error in fork2. Exiting\n");
-        exit(1);
-    }
-    //child2 process
-    if(child2PID==0) {
-        // close(STDIN_FILENO);
-        dup2(pd[0],STDIN_FILENO);
-        close(pd[0]);
-        execvp(lineFromInput->next->arguments[0],lineFromInput->next->arguments);
-    }
-    else {
-        fprintf(stderr, "(parent_process>created child2 process with id: %d)\n", child2PID);
-        close(pd[0]);
-    }
-    waitpid(child1PID, NULL, 0);
-    waitpid(child2PID, NULL, 0);
 }
 
 
@@ -96,9 +127,29 @@ int commands(cmdLine *lineFromInput) {
 
 
 void execute(cmdLine *lineFromInput) {
-
+    
     if(commands(lineFromInput)) return;
+    if(lineFromInput->next) {
+            if(lineFromInput->outputRedirect) {
+                perror("cant do output redirect on left side of pipe. Exiting\n");
+                freeCmdLines(lineFromInput);
+                exit(1);
+            }
+            else if(lineFromInput->next->inputRedirect){
+                perror("cant do input redirect on right side of pipe. Exiting\n");
+                freeCmdLines(lineFromInput);
+                exit(1);
+            }
+            
+            pipecmd(lineFromInput);
+        }
+else {
     pid_t PID = fork();
+    if( PID == -1) { // error
+            perror("Error in fork");
+            freeCmdLines(lineFromInput);
+            exit(1);
+        }
     if (PID==0) { // child
       
         if (lineFromInput->inputRedirect) {
@@ -122,40 +173,18 @@ void execute(cmdLine *lineFromInput) {
         close(outputFile);
         
     }
-      if(lineFromInput->next) {
-            if(lineFromInput->outputRedirect) {
-                perror("cant do output redirect on left side of pipe. Exiting\n");
-                freeCmdLines(lineFromInput);
-                exit(1);
-            }
-            else if(lineFromInput->next->inputRedirect){
-                perror("cant do input redirect on right side of pipe. Exiting\n");
-                freeCmdLines(lineFromInput);
-                exit(1);
-            }
-            if(lineFromInput->next->outputRedirect) {
-                int outputFile = open(lineFromInput->next->outputRedirect, O_WRONLY|O_CREAT);
-                if (outputFile == -1) {
-                    perror("Error in open for output");
-                    freeCmdLines(lineFromInput);
-                    exit(1);
-            }
-            dup2(outputFile,STDOUT_FILENO);
-            close(outputFile);
-            }
-            
-            pipecmd(lineFromInput);
-        }
 
-     else if (execvp(lineFromInput->arguments[0], lineFromInput->arguments) == -1){
+     else { 
+         if (execvp(lineFromInput->arguments[0], lineFromInput->arguments) == -1){
             perror("Error in execv");
             freeCmdLines(lineFromInput);
             exit(1);
+     }
         }
     
     }
 
-    else if (PID > 0) { //parent
+    else { //parent
         
         if(debug) {
         fprintf(stderr, "PID: %d\n", PID);
@@ -173,37 +202,28 @@ void execute(cmdLine *lineFromInput) {
         }
 
     }
-    else { // error
-            perror("Error in fork");
-            freeCmdLines(lineFromInput);
-            exit(1);
-        }
     }
+}
 
 
 
 int main(int argc, char **argv) {
+    char input[2048];
+    char cwd[PATH_MAX];
+    for (int i=0; i<argc;i++) {
+        if (strcmp(argv[i],"-d") ==0 ) {
+            debug = 1;
+        }
+    }
     while(1) {
 
-        for (int i=0; i<argc;i++) {
-            if (strcmp(argv[i],"-d") ==0 ) {
-                debug = 1;
-            }
-        }
-
-        char cwd[PATH_MAX];
-        char input[2048];
         if (getcwd(cwd, PATH_MAX) != NULL) {
             printf("current working directory: %s\n", cwd);
         } else {
             perror("error in getcwd function");
         }
         printf("enter input\n");
-        if (fgets(input, sizeof(input), stdin) == NULL) {
-            // Exit the loop on EOF
-            printf("Exiting \n");
-            exit(1);
-        }
+        fgets(input, sizeof(input), stdin);
 
         cmdLine *lineFromInput = parseCmdLines(input);
 
@@ -218,6 +238,11 @@ int main(int argc, char **argv) {
 
     }
     return 0;
+}
+
+
+
+
 }
 
 
