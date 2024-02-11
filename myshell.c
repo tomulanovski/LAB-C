@@ -6,9 +6,55 @@
 #include <fcntl.h>
 #include <errno.h>
 
+#define TERMINATED -1
+#define RUNNING 1
+#define SUSPENDED 0
+
 int debug = 0;
 
-void pipecmd(cmdLine *lineFromInput) {
+ typedef struct process{
+        cmdLine* cmd;                         /* the parsed command line*/
+        pid_t pid; 		                  /* the process id that is running the command*/
+        int status;                           /* status of the process: RUNNING/SUSPENDED/TERMINATED */
+        struct process *next;	                  /* next process in chain */
+    } process;
+
+
+void addProcess(process** process_list, cmdLine* cmd, pid_t pid){
+    process* new_process = (process*)malloc(sizeof(process));
+    new_process->cmd = cmd;
+    new_process->pid = pid;
+    new_process->status = RUNNING;
+    new_process->next = *process_list;
+    *process_list = new_process;
+    
+}
+
+void printProcessList(process** process_list){
+    printf("PID\tCommand\t\tSTATUS\n");
+    process* current = *process_list;
+    while (current != NULL) {
+        printf("%d\t%s", current->pid, current->cmd->arguments[0]);
+        switch (current->status) {
+            case TERMINATED:
+                printf("\tTerminated\n");
+                break;
+            case RUNNING:
+                printf("\tRunning\n");
+                break;
+            case SUSPENDED:
+                printf("\tSuspended\n");
+                break;
+            default:
+                printf("\tStatus is wrong\n");
+                break;
+        }
+        current = current->next;
+    }
+}
+
+
+void pipecmd(cmdLine *lineFromInput , process** process_list) {
     
     int pd[2];
     if(pipe(pd)==-1) {
@@ -20,8 +66,10 @@ void pipecmd(cmdLine *lineFromInput) {
         perror("error in fork1. Exiting\n");
         exit(1);
     }
+    
     //child1 process
     if(child1PID==0) {
+        printf("fork in child1 pipe\n");
         close(STDOUT_FILENO);
         dup(pd[1]);
         close(pd[1]);
@@ -44,6 +92,7 @@ void pipecmd(cmdLine *lineFromInput) {
     }
     //parent process
     else {
+        addProcess(process_list,lineFromInput,child1PID);
         fprintf(stderr, "(parent_process>created child1 process with id: %d)\n", child1PID);
         close(pd[1]);
         pid_t child2PID = fork();
@@ -53,6 +102,7 @@ void pipecmd(cmdLine *lineFromInput) {
         }
         //child2 process
         if(child2PID==0) {
+            printf("fork in child2 pipe\n");
             close(STDIN_FILENO);
             dup(pd[0]);
             close(pd[0]);
@@ -74,6 +124,7 @@ void pipecmd(cmdLine *lineFromInput) {
             }
         }
         else {
+            addProcess(process_list,lineFromInput,child2PID);
             fprintf(stderr, "(parent_process>created child2 process with id: %d)\n", child2PID);
             close(pd[0]);
             waitpid(child1PID, NULL, 0);
@@ -83,8 +134,7 @@ void pipecmd(cmdLine *lineFromInput) {
 }
 
 
-int commands(cmdLine *lineFromInput) {
-      
+int commands(cmdLine *lineFromInput, process** process_list) {
     if (strcmp(lineFromInput->arguments[0], "cd") == 0) {
         // Handle 'cd' command
         if (chdir(lineFromInput->arguments[1]) == -1) {
@@ -94,6 +144,7 @@ int commands(cmdLine *lineFromInput) {
         }
         return 1;
     }
+    
     if (strcmp(lineFromInput->arguments[0], "wakeup") == 0) {
         // Handle 'wakeup' command
         pid_t pid = atoi(lineFromInput->arguments[1]);
@@ -104,6 +155,19 @@ int commands(cmdLine *lineFromInput) {
         }
         else {
             printf("wakeup succeded\n");
+        }
+        return 1;
+    }
+    if (strcmp(lineFromInput->arguments[0], "suspend") == 0) {
+        // Handle 'suspend' command
+        pid_t pid = atoi(lineFromInput->arguments[1]);
+        if (kill(pid, SIGTSTP) == -1) {
+            perror("Error in suspend");
+            freeCmdLines(lineFromInput);
+            exit(1);
+        }
+        else {
+            printf("suspend succeded\n");
         }
         return 1;
     }
@@ -126,9 +190,9 @@ int commands(cmdLine *lineFromInput) {
 }
 
 
-void execute(cmdLine *lineFromInput) {
+void execute(cmdLine *lineFromInput,process** process_list) {
     
-    if(commands(lineFromInput)) return;
+    if(commands(lineFromInput, process_list)) return;
     if(lineFromInput->next) {
             if(lineFromInput->outputRedirect) {
                 perror("cant do output redirect on left side of pipe. Exiting\n");
@@ -141,7 +205,7 @@ void execute(cmdLine *lineFromInput) {
                 exit(1);
             }
             
-            pipecmd(lineFromInput);
+            pipecmd(lineFromInput , process_list);
         }
 else {
     pid_t PID = fork();
@@ -185,7 +249,8 @@ else {
     }
 
     else { //parent
-        
+
+        addProcess(process_list,lineFromInput,PID);
         if(debug) {
         fprintf(stderr, "PID: %d\n", PID);
         fprintf(stderr, "Executing command: %s\n", lineFromInput->arguments[0]);
@@ -208,6 +273,7 @@ else {
 
 
 int main(int argc, char **argv) {
+    process* process_list = NULL;
     char input[2048];
     char cwd[PATH_MAX];
     for (int i=0; i<argc;i++) {
@@ -227,18 +293,23 @@ int main(int argc, char **argv) {
 
         cmdLine *lineFromInput = parseCmdLines(input);
 
-         if (strcmp(input, "quit\n") == 0) {
+        if (strcmp(input, "quit\n") == 0) {
             printf("Exiting myshell\n");
             break;  // Exit the infinite loop if the user enters "quit"
         }
+        else if (strcmp(input, "procs\n")==0) {
+            printProcessList(&process_list);
+        }
         else {
-            execute(lineFromInput);
+            execute(lineFromInput , &process_list);
             freeCmdLines(lineFromInput);
         }
 
     }
     return 0;
 }
+
+
 
 
 
