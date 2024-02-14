@@ -9,8 +9,11 @@
 #define TERMINATED -1
 #define RUNNING 1
 #define SUSPENDED 0
+#define HISTLEN 20 // history length
 
 int debug = 0;
+int newest = 0,oldest = 0 , sizeOfHistory = 0;
+char* historyArr[HISTLEN];
 
  typedef struct process{
         cmdLine* cmd;                         /* the parsed command line*/
@@ -19,6 +22,100 @@ int debug = 0;
         struct process *next;	                  /* next process in chain */
     } process;
 
+void freeCmdLinesOfLeft(cmdLine *pCmdLine)
+{
+    int i;
+    if (!pCmdLine)
+        return;
+
+    FREE(pCmdLine->inputRedirect);
+    FREE(pCmdLine->outputRedirect);
+    for (i=0; i<pCmdLine->argCount; ++i)
+        FREE(pCmdLine->arguments[i]);
+
+    FREE(pCmdLine);
+}
+
+
+void freeHistory() {
+    for (int i=0;i<sizeOfHistory;i++) {
+        free(historyArr[i]);
+    }
+}
+
+void addToHistory(char* command) {
+    int full=0;
+    if(sizeOfHistory==HISTLEN) {
+        full = 1;
+        free(historyArr[oldest]);
+    }
+    historyArr[newest] = strdup(command);
+    if (full) oldest = (oldest+1) % HISTLEN;
+    newest = (newest+1) % HISTLEN;
+    sizeOfHistory = (sizeOfHistory < HISTLEN) ? (sizeOfHistory+1) : sizeOfHistory;
+     
+}
+
+void printHistory() {
+    if (sizeOfHistory==0) {
+        printf("no history\n");
+    }
+    int curr = oldest;
+    for (int i=0;i<sizeOfHistory;i++) {
+        printf("%d:%s",i+1,historyArr[curr]);
+        curr = (curr+1) % HISTLEN;
+    }
+}
+
+void freeProcessList(process* process_list){
+    
+    while (process_list) {
+        process* tmp = process_list ->next;
+        if(process_list->cmd)
+            freeCmdLines(process_list->cmd);
+        if(process_list) 
+            free(process_list);
+        process_list = tmp;     
+    }
+}
+void updateProcessStatus(process* process_list, int pid, int status) {
+    process* current = process_list;
+    while (current != NULL) {
+        if (current->pid == pid) {
+            current->status = status;
+            break; // No need to continue searching
+        }
+        current = current->next;
+    }
+}
+void updateProcessList(process **process_list) {
+    process* current = *process_list;
+    while (current != NULL) {
+        int status;
+        pid_t result = waitpid(current->pid, &status, WNOHANG);
+        if (result == -1) {
+            updateProcessStatus(current,current->pid,TERMINATED);
+            current = current->next;
+            continue;
+        }
+        else if (result!=0) {
+            // Process has terminated
+            if (WIFEXITED(status) || WIFSIGNALED(status)) {
+                // Process exited normally or due to a signal
+                updateProcessStatus(current,current->pid,TERMINATED);
+            } else if (WIFSTOPPED(status)) {
+                // Process was stopped by a signal
+                updateProcessStatus(current,current->pid,SUSPENDED);
+            } else if (WIFCONTINUED(status)) {
+                // Process was resumed by a signal
+                updateProcessStatus(current,current->pid,RUNNING);
+            }
+            // Move to the next process
+    }
+ 
+    current = current->next;
+}
+    }
 
 void addProcess(process** process_list, cmdLine* cmd, pid_t pid){
     process* new_process = (process*)malloc(sizeof(process));
@@ -31,25 +128,42 @@ void addProcess(process** process_list, cmdLine* cmd, pid_t pid){
 }
 
 void printProcessList(process** process_list){
-    printf("PID\tCommand\t\tSTATUS\n");
+    updateProcessList(process_list);
+    printf("PID\tCommand\t\t\tSTATUS\n");
     process* current = *process_list;
+    process* prev = NULL;
     while (current != NULL) {
-        printf("%d\t%s", current->pid, current->cmd->arguments[0]);
+        printf("%d\t%s\t\t", current->pid, current->cmd->arguments[0]);
         switch (current->status) {
             case TERMINATED:
                 printf("\tTerminated\n");
+               if (prev == NULL) {
+                    *process_list = current->next;
+                } else {
+                    prev->next = current->next;
+                }
+                process* tmp = current;
+                current = prev ? prev->next : *process_list;
+                if(!tmp->cmd->next) freeCmdLines(tmp->cmd);
+                else freeCmdLinesOfLeft(tmp->cmd);
+                free(tmp);
                 break;
             case RUNNING:
                 printf("\tRunning\n");
+                prev = current;
+                current = current->next;
                 break;
             case SUSPENDED:
                 printf("\tSuspended\n");
+                prev = current;
+                current = current->next;
                 break;
             default:
                 printf("\tStatus is wrong\n");
+                prev = current;
+                current = current->next;
                 break;
         }
-        current = current->next;
     }
 }
 
@@ -108,7 +222,7 @@ void pipecmd(cmdLine *lineFromInput , process** process_list) {
             close(pd[0]);
             close(pd[1]);
              if(lineFromInput->next->outputRedirect) {
-                int outputFile = open(lineFromInput->next->outputRedirect, O_WRONLY|O_CREAT);
+                int outputFile = open(lineFromInput->next->outputRedirect, O_WRONLY|O_CREAT | O_TRUNC);
                 if (outputFile == -1) {
                     perror("Error in open for output");
                     freeCmdLines(lineFromInput);
@@ -124,7 +238,7 @@ void pipecmd(cmdLine *lineFromInput , process** process_list) {
             }
         }
         else {
-            addProcess(process_list,lineFromInput,child2PID);
+            addProcess(process_list,lineFromInput->next,child2PID);
             fprintf(stderr, "(parent_process>created child2 process with id: %d)\n", child2PID);
             close(pd[0]);
             waitpid(child1PID, NULL, 0);
@@ -154,6 +268,7 @@ int commands(cmdLine *lineFromInput, process** process_list) {
             exit(1);
         }
         else {
+            updateProcessStatus(*process_list,pid,RUNNING);
             printf("wakeup succeded\n");
         }
         return 1;
@@ -167,6 +282,7 @@ int commands(cmdLine *lineFromInput, process** process_list) {
             exit(1);
         }
         else {
+            updateProcessStatus(*process_list,pid,SUSPENDED);
             printf("suspend succeded\n");
         }
         return 1;
@@ -181,6 +297,7 @@ int commands(cmdLine *lineFromInput, process** process_list) {
             exit(1);
         }
         else {
+            updateProcessStatus(*process_list,pid,TERMINATED);
             printf("nuke succeded\n");
             
         }
@@ -191,17 +308,20 @@ int commands(cmdLine *lineFromInput, process** process_list) {
 
 
 void execute(cmdLine *lineFromInput,process** process_list) {
+
     
     if(commands(lineFromInput, process_list)) return;
     if(lineFromInput->next) {
             if(lineFromInput->outputRedirect) {
                 perror("cant do output redirect on left side of pipe. Exiting\n");
                 freeCmdLines(lineFromInput);
+                freeCmdLines(lineFromInput->next);
                 exit(1);
             }
             else if(lineFromInput->next->inputRedirect){
                 perror("cant do input redirect on right side of pipe. Exiting\n");
                 freeCmdLines(lineFromInput);
+                freeCmdLines(lineFromInput->next);
                 exit(1);
             }
             
@@ -227,7 +347,7 @@ else {
         close(inputFile);
     }
      if (lineFromInput->outputRedirect) {
-        int outputFile = open(lineFromInput->outputRedirect, O_WRONLY|O_CREAT);
+        int outputFile = open(lineFromInput->outputRedirect, O_WRONLY|O_CREAT| O_TRUNC);
         if (outputFile == -1) {
             perror("Error in open for output");
             freeCmdLines(lineFromInput);
@@ -238,15 +358,12 @@ else {
         
     }
 
-     else { 
          if (execvp(lineFromInput->arguments[0], lineFromInput->arguments) == -1){
             perror("Error in execv");
             freeCmdLines(lineFromInput);
             exit(1);
      }
         }
-    
-    }
 
     else { //parent
 
@@ -259,18 +376,16 @@ else {
         if(lineFromInput->blocking) {
             int status;
             waitpid(PID, &status, 0);
+
         }
         else {
             
             fprintf(stderr, "Background process started with PID: %d\n", PID);
             return;  
         }
-
     }
     }
 }
-
-
 
 int main(int argc, char **argv) {
     process* process_list = NULL;
@@ -281,6 +396,10 @@ int main(int argc, char **argv) {
             debug = 1;
         }
     }
+    // for (int i=0;i<HISTLEN;i++) {
+    //     historyArr[i] = NULL;
+    // }
+
     while(1) {
 
         if (getcwd(cwd, PATH_MAX) != NULL) {
@@ -290,30 +409,58 @@ int main(int argc, char **argv) {
         }
         printf("enter input\n");
         fgets(input, sizeof(input), stdin);
-
         cmdLine *lineFromInput = parseCmdLines(input);
 
         if (strcmp(input, "quit\n") == 0) {
+            freeCmdLines(lineFromInput);
             printf("Exiting myshell\n");
             break;  // Exit the infinite loop if the user enters "quit"
         }
         else if (strcmp(input, "procs\n")==0) {
+            printHistory();
             printProcessList(&process_list);
+            freeCmdLines(lineFromInput);
+        }
+        else if(strcmp(input,"history\n")==0)
+        {
+            printHistory();
+            freeCmdLines(lineFromInput);
+        }
+        else if(strcmp(input,"!!\n")==0)
+        {
+            if(sizeOfHistory) {
+            int index = newest==0? HISTLEN-1: newest-1;
+            cmdLine *lastLineExecuted = parseCmdLines(historyArr[index]);
+            execute(lastLineExecuted , &process_list);
+            freeCmdLines(lineFromInput);
         }
         else {
-            execute(lineFromInput , &process_list);
+            printf("no history\n");
+        }
+        }
+        else if(strcmp(input,"!")==0)
+        {
+            int index = atoi(lineFromInput->arguments[0]+1);
+            if( index >=0 && index < sizeOfHistory ) {
+            cmdLine *nIndexHistory = parseCmdLines(historyArr[index]);
+            execute(nIndexHistory,&process_list);
             freeCmdLines(lineFromInput);
+            }
+            else
+             printf("invalid index\n");
+              
+        }
+        
+        else {
+            addToHistory(input);
+            execute(lineFromInput , &process_list);
+            // freeCmdLines(lineFromInput);
         }
 
     }
+    freeHistory();
+    freeProcessList(process_list);
     return 0;
-}
-
-
-
-
-
-
 }
 
 
